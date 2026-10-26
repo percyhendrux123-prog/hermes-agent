@@ -33,6 +33,18 @@ const composer = vi.hoisted(() => {
   return { aui: { composer: () => api }, runtime }
 })
 
+// The stored transcript the owner serves for a session (the REST page the outbox reads on reopen).
+const transcript = vi.hoisted(() => ({ rows: new Map<string, unknown[]>() }))
+
+vi.mock('@/api/sessions', async importOriginal => ({
+  ...(await importOriginal<object>()),
+  getSessionMessages: async (id: string) => ({
+    messages: transcript.rows.get(id) ?? [],
+    pagination: { limit: 200, offset: 0, order: 'latest' },
+    session_id: id
+  })
+}))
+
 vi.mock('@assistant-ui/react', () => ({
   useAui: () => composer.aui,
   useAuiState: (selector: (state: { composer: { text: string } }) => unknown) =>
@@ -48,7 +60,9 @@ interface Handles {
 let handles: Handles
 
 // One app page: fresh imports of the composer hooks and stores (as a reload or relaunch gets).
-async function openPage(onSubmit: ChatBarProps['onSubmit']) {
+// Opening the session resumes it: the owner's snapshot lists its pending admissions (`pending`).
+async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] = []) {
+  const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
   const { useComposerDraft } = await import('./use-composer-draft')
   const { useComposerSubmit } = await import('./use-composer-submit')
   const { mainComposerScope } = await import('@/store/composer')
@@ -95,7 +109,10 @@ async function openPage(onSubmit: ChatBarProps['onSubmit']) {
     return <div contentEditable data-testid="editor" ref={draft.editorRef} />
   }
 
-  return render(<Page />)
+  const page = render(<Page />)
+  reconcilePendingSubmissions('stored-B', pending)
+
+  return page
 }
 
 function closeWindow() {
@@ -107,8 +124,12 @@ function closeWindow() {
 afterEach(() => {
   cleanup()
   window.localStorage.clear()
+  transcript.rows.clear()
   vi.resetModules()
 })
+
+const outboxKeys = () =>
+  Object.keys(window.localStorage).filter(key => key.startsWith('hermes:composer-outbox:'))
 
 it('a message sent right before the window closes is never lost and never sent twice', async () => {
   window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': 'answered question' }))
@@ -144,4 +165,34 @@ it('a message sent right before the window closes is never lost and never sent t
   expect(reopened).toHaveBeenCalledTimes(1)
   expect(reopened.mock.calls[0][0].trim()).toBe('my long question')
   expect(reopened.mock.calls[0][1]?.submission_id).toBe(firstId)
+})
+
+it('a send the owner admitted before the window closed is never offered again as the draft', async () => {
+  // Admitted and run (its stored user row names it), or admitted and still queued (only the resume
+  // snapshot lists it): either way the chat already shows it.
+  const landed = {
+    queued: (id: string) => ({ pending: [{ admission_id: 'adm-1', input_id: id, status: 'queued', text: 'queued one' }] }),
+    ran: (id: string) => ({ row: { content: 'ran one', display_metadata: { submission_id: id }, role: 'user' } })
+  }
+
+  for (const [text, owner] of [['ran one', landed.ran], ['queued one', landed.queued]] as const) {
+    // Enter, the frame reaches the owner, and the window closes before the ack comes back.
+    window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
+    const unacked = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
+    await openPage(unacked)
+    act(() => handles.submitDraft())
+    const held = owner(unacked.mock.calls[0][1]?.submission_id ?? '')
+    closeWindow()
+
+    transcript.rows.set('stored-B', 'row' in held ? [held.row] : [])
+    const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+    await openPage(reopened, 'pending' in held ? held.pending : [])
+    await waitFor(() => expect(outboxKeys()).toEqual([]))
+    await act(async () => {})
+    // Shown once (in the chat), never also back in the composer.
+    expect(handles.editor()).toBe('')
+    expect(reopened).not.toHaveBeenCalled()
+    closeWindow()
+    window.localStorage.clear()
+  }
 })

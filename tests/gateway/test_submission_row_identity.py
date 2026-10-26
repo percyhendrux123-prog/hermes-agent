@@ -1,0 +1,44 @@
+"""The user row a canonical admission persists names the client's ``submission_id``.
+
+A Desktop window that closes after the owner admitted a send but before the ack came back reads the
+stored transcript on reopen to tell a send that landed from one that never did (its composer outbox).
+"""
+from types import SimpleNamespace
+
+import pytest
+
+from tests.gateway.test_surface_admission import _authority
+
+
+@pytest.mark.asyncio
+async def test_the_admitted_turns_user_row_names_its_submission_id(tmp_path, monkeypatch):
+    from gateway.run_turn_persistence import GatewayTurnPersistenceMixin
+    from gateway.session_controls import AuthorityConnection
+
+    def stored_metadata(event):
+        prepared = SimpleNamespace(persist_user_message=None, message_text=event.text, persist_user_timestamp=None,
+                                   persist_user_display_kind=None, persistence_owner=None)
+        return GatewayTurnPersistenceMixin._hmwa_user_transcript_entry(event, prepared, 0.0).get('display_metadata', {})
+
+    seen = []
+    async def answer(event):
+        # A follow-up event on the same task (a /queue chain) is another input: it never inherits the id.
+        stray = SimpleNamespace(message_id='other', internal=False, metadata={}, text='stray')
+        seen.append((event.text, stored_metadata(event), stored_metadata(stray)))
+        return 'ok'
+    authority = await _authority(tmp_path, monkeypatch, answer)
+    connection = AuthorityConnection(authority, object(), {'user_id': 'owner'})
+    try:
+        await connection.dispatch({'id': 1, 'method': 'session.resume', 'params': {'session_id': 's'}})
+        for rid, extra in (('send-1', {}), ('send-2', {'title_preview': 'Notes'})):
+            reply = await connection.dispatch({'id': 2, 'method': 'prompt.submit', 'params': {
+                'session_id': 's', 'submission_id': rid, 'text': rid, **extra}})
+            assert reply.get('result', {}).get('status') == 'queued', reply
+            await authority.sessions['s'].task
+    finally:
+        await connection.close()
+
+    assert seen == [
+        ('send-1', {'submission_id': 'send-1'}, {}),
+        ('send-2', {'title_preview': 'Notes', 'submission_id': 'send-2'}, {}),
+    ]

@@ -1,5 +1,6 @@
 import { freshDraftScope } from './composer'
 import type { ComposerDraftRetry } from './composer-draft-retry'
+import { sendLanded } from './composer-outbox-landed'
 
 // Enter clears the composer and hands the words to an async send chain (session resume or create,
 // attachment sync, the prepared journal) before `prompt.submit` is written. Closing or reloading the
@@ -9,12 +10,17 @@ import type { ComposerDraftRetry } from './composer-draft-retry'
 // path). An entry no live page holds is a send its page never finished: the next load of its draft
 // scope restores it as the draft with its retry identity, so sending it again is the explicit retry
 // under the same submission id and the owner never runs it twice. Restored, never re-sent on its
-// own: like the prepared journal, this is not an automatic outbox.
+// own: like the prepared journal, this is not an automatic outbox. An entry whose send the owner
+// already admitted (the window closed after the frame left but before the ack came back) is in the
+// owner's pending snapshot or stored transcript under its submission id: it is dropped instead, so
+// a send is never both shown and offered again.
 const PREFIX = 'hermes:composer-outbox:v1:'
 
 interface OutboxEntry {
   scope: string
   retry: ComposerDraftRetry
+  /** When Enter journaled it (ms): bounds the transcript search for its stored row. */
+  at?: number
 }
 
 // Journal keys of sends this page has in flight: key -> release of the Web Lock that marks the
@@ -65,8 +71,9 @@ export interface OutgoingSend {
 
 /** Journal one send synchronously, before any await of the send chain can be cut by unload. */
 export function journalOutgoingSend(scope: string | null, retry: ComposerDraftRetry): OutgoingSend {
+  const at = Date.now()
   let key = entryKey(scopeKey(scope), retry.id)
-  write(key, { scope: scopeKey(scope), retry })
+  write(key, { at, scope: scopeKey(scope), retry })
   hold(key)
 
   const release = () => {
@@ -84,15 +91,16 @@ export function journalOutgoingSend(scope: string | null, retry: ComposerDraftRe
 
       release()
       key = entryKey(scopeKey(next), retry.id)
-      write(key, { scope: scopeKey(next), retry })
+      write(key, { at, scope: scopeKey(next), retry })
       hold(key)
     },
     retire: release
   }
 }
 
-/** Offer `scope`'s interrupted send (one no live page owns) to `apply`; the entry is removed only
- *  when `apply` took it, so a composer the user already typed into leaves it for the next load. */
+/** Offer `scope`'s interrupted send (one no live page owns) to `apply`; the entry is removed when
+ *  its send already landed in the stored transcript (silently) or when `apply` took it, so a
+ *  composer the user already typed into leaves it for the next load. */
 export async function restoreInterruptedSend(
   scope: string | null | undefined,
   apply: (retry: ComposerDraftRetry) => boolean
@@ -108,10 +116,16 @@ export async function restoreInterruptedSend(
     }
   }
 
-  const take = (key: string) => {
+  const take = async (key: string) => {
     const entry = read(key)
 
-    if (entry && !ownedHere.has(key) && apply(entry.retry)) {
+    if (!entry || ownedHere.has(key)) {
+      return
+    }
+
+    if (await sendLanded(entry.scope, entry.retry.id, entry.at)) {
+      write(key, undefined)
+    } else if (read(key) && apply(entry.retry)) {
       write(key, undefined)
     }
   }
@@ -120,10 +134,11 @@ export async function restoreInterruptedSend(
 
   for (const key of keys.sort()) {
     if (!available) {
-      take(key)
+      await take(key)
     } else {
-      // A held lock is another live window's send still in flight: never adopted from here.
-      await available.request(lockName(key), { ifAvailable: true }, lock => void (lock && take(key)))
+      // A held lock is another live window's send still in flight: never adopted from here. The
+      // lock stays held across the transcript read, so two windows never both adopt one entry.
+      await available.request(lockName(key), { ifAvailable: true }, lock => (lock ? take(key) : undefined))
     }
   }
 }

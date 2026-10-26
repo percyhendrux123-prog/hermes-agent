@@ -1,3 +1,4 @@
+import { noteListedSubmissions } from './admitted-submissions'
 import { getQueuedPrompts, type QueuedPromptEntry, writeSessionQueue } from './composer-queue'
 import { $sessions, resolveComposerSessionKey } from './session'
 
@@ -332,6 +333,7 @@ export function reconcilePendingSubmissions(storedId: string, value: unknown, fe
   // shown there. Receipts journaled under the tip before the lineage was known move along.
   const key = journalKey(storedId)
   adoptJournal(storedId, key)
+  noteListedSubmissions(key, value.flatMap(raw => (typeof raw?.input_id === 'string' ? [raw.input_id] : [])))
 
   const before = readPendingSubmissions(key)
   const known = { ...before }
