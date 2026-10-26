@@ -168,14 +168,19 @@ it('a message sent right before the window closes is never lost and never sent t
 })
 
 it('a send the owner admitted before the window closed is never offered again as the draft', async () => {
-  // Admitted and run (its stored user row names it), or admitted and still queued (only the resume
-  // snapshot lists it): either way the chat already shows it.
+  // Admitted and run (its stored user row names it), admitted and still queued (the resume snapshot
+  // lists it), or listed only by a snapshot that came after the draft was offered.
+  const queued = (id: string, text: string) => [{ admission_id: 'adm-1', input_id: id, status: 'queued', text }]
+
   const landed = {
-    queued: (id: string) => ({ pending: [{ admission_id: 'adm-1', input_id: id, status: 'queued', text: 'queued one' }] }),
+    late: (id: string) => ({ late: queued(id, 'late one') }),
+    queued: (id: string) => ({ pending: queued(id, 'queued one') }),
     ran: (id: string) => ({ row: { content: 'ran one', display_metadata: { submission_id: id }, role: 'user' } })
   }
 
-  for (const [text, owner] of [['ran one', landed.ran], ['queued one', landed.queued]] as const) {
+  const cases = [['ran one', landed.ran], ['queued one', landed.queued], ['late one', landed.late]] as const
+
+  for (const [text, owner] of cases) {
     // Enter, the frame reaches the owner, and the window closes before the ack comes back.
     window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
     const unacked = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
@@ -189,6 +194,13 @@ it('a send the owner admitted before the window closed is never offered again as
     await openPage(reopened, 'pending' in held ? held.pending : [])
     await waitFor(() => expect(outboxKeys()).toEqual([]))
     await act(async () => {})
+
+    if ('late' in held) {
+      expect(handles.editor()).toBe(text)
+      const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
+      act(() => reconcilePendingSubmissions('stored-B', held.late))
+    }
+
     // Shown once (in the chat), never also back in the composer.
     expect(handles.editor()).toBe('')
     expect(reopened).not.toHaveBeenCalled()

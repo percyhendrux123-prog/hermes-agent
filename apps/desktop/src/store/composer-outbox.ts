@@ -1,3 +1,4 @@
+import { onListedSubmissions } from './admitted-submissions'
 import { freshDraftScope } from './composer'
 import type { ComposerDraftRetry } from './composer-draft-retry'
 import { sendLanded } from './composer-outbox-landed'
@@ -98,12 +99,31 @@ export function journalOutgoingSend(scope: string | null, retry: ComposerDraftRe
   }
 }
 
+// A snapshot can list the admission only after the draft was offered (the owner committed the dead
+// page's frame after this page's resume, or the snapshot came late). The owner's listing is the
+// answer: `withdraw` takes the offered draft back if the composer still holds it untouched.
+const WITHDRAW_WATCH_MS = 120_000
+
+function withdrawOnceListed(entry: OutboxEntry, withdraw: (retry: ComposerDraftRetry) => void): void {
+  let stop = () => {}
+  const timer = setTimeout(() => stop(), WITHDRAW_WATCH_MS)
+
+  stop = onListedSubmissions(entry.scope, ids => {
+    if (ids.has(entry.retry.id)) {
+      clearTimeout(timer)
+      stop()
+      withdraw(entry.retry)
+    }
+  })
+}
+
 /** Offer `scope`'s interrupted send (one no live page owns) to `apply`; the entry is removed when
  *  its send already landed in the stored transcript (silently) or when `apply` took it, so a
  *  composer the user already typed into leaves it for the next load. */
 export async function restoreInterruptedSend(
   scope: string | null | undefined,
-  apply: (retry: ComposerDraftRetry) => boolean
+  apply: (retry: ComposerDraftRetry) => boolean,
+  withdraw: (retry: ComposerDraftRetry) => void
 ): Promise<void> {
   const target = scopeKey(scope)
   const keys: string[] = []
@@ -127,6 +147,7 @@ export async function restoreInterruptedSend(
       write(key, undefined)
     } else if (read(key) && apply(entry.retry)) {
       write(key, undefined)
+      withdrawOnceListed(entry, withdraw)
     }
   }
 

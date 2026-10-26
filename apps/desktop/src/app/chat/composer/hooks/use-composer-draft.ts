@@ -706,6 +706,19 @@ export function useComposerDraft({
         loadIntoComposer(retry.text, [])
 
         return true
+      }, retry => {
+        // The owner listed it after all: take back the offered draft unless the user changed it.
+        if (
+          draftScopeRef.current !== activeQueueSessionKey ||
+          syncDraftFromEditor().trim() !== retry.text.trim() ||
+          readDraftRetry(activeQueueSessionKey)?.id !== retry.id
+        ) {
+          return
+        }
+
+        stashAt(activeQueueSessionKey, '', [])
+        writeDraftRetry(activeQueueSessionKey, undefined)
+        loadIntoComposer('', [])
       })
     }
 
