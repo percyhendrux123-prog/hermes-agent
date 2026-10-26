@@ -535,6 +535,14 @@ export function useComposerSubmit({
   // tool boundary. If the turn already ended, queue the words instead.
   const steerDraft = (mode: 'interrupt' | 'steer' = 'interrupt') => {
     const text = draftRef.current.trim()
+    // The Steer action on a restored send: queued under its id like a busy Enter (see queueRetry).
+    const retry = attachments.length ? undefined : takeDraftRetry?.(draftRef.current, [])
+
+    if (retry) {
+      queueRetry(retry)
+
+      return
+    }
 
     // Guard on live editor state, not the render-lagged `canSteer`: a redirect
     // fired on a fast Enter must not be dropped because state hasn't synced.

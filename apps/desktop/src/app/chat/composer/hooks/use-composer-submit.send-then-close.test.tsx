@@ -263,6 +263,28 @@ it('an interrupted send with attachments comes back once, under its id, even whe
   await waitFor(() => expect(outboxKeys()).toEqual([]))
   await act(async () => {})
   expect(handles.editor()).toBe('')
+  closeWindow()
+  window.localStorage.clear()
+
+  // A send whose outcome is unknown (timed out) is given back with its id; after a reload the saved
+  // draft has its words but not its attachment, and Enter on it still retries that send.
+  saveDraft('unknown words')
+
+  const timedOut = vi.fn<ChatBarProps['onSubmit']>(async () => {
+    throw new Error('request timed out')
+  })
+
+  await openPage(timedOut)
+  act(() => handles.attach('example.com/b'))
+  await act(async () => handles.submitDraft())
+  await waitFor(() => expect(handles.editor()).toBe('unknown words'))
+  closeWindow()
+
+  const retried = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+  await openPage(retried)
+  expect(handles.editor()).toBe('unknown words')
+  await act(async () => handles.submitDraft())
+  expect(retried.mock.calls[0][1]?.submission_id).toBe(timedOut.mock.calls[0][1]?.submission_id)
 })
 
 it('a restored send retried while a turn runs is queued under its id, never steered as a new message', async () => {

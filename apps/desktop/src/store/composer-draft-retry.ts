@@ -40,6 +40,19 @@ export function matchingDraftRetry(
     : undefined
 }
 
+/** The identity a loaded draft carries. The draft store persists text only, so a draft that comes
+ *  back after the page died has lost its attachments: its identity then names exactly what is
+ *  offered (the words), and Enter on it is still the explicit retry instead of a new message. */
+export function loadedDraftRetry(
+  retry: ComposerDraftRetry | undefined,
+  text: string,
+  attachments: ComposerAttachment[]
+): ComposerDraftRetry | undefined {
+  return retry && attachments.length === 0 && retry.attachmentIds.length > 0 && draftRetryTextMatches(retry, text)
+    ? { ...retry, attachmentIds: [] }
+    : retry
+}
+
 /** The storage key of a draft scope, the same resolution the draft stash uses. */
 const scopeKey = (scope: string | null | undefined) => scope?.trim() || freshDraftScope()
 
