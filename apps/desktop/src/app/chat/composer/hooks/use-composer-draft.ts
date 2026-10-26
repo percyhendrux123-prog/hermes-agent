@@ -26,6 +26,7 @@ import {
   writeDraftRetry
 } from '@/store/composer-draft-retry'
 import { isBrowsingHistory } from '@/store/composer-input-history'
+import { restoreInterruptedSend } from '@/store/composer-outbox'
 import { $composerPopout } from '@/store/composer-popout'
 import { migrateQueuedPrompts } from '@/store/composer-queue'
 
@@ -692,6 +693,21 @@ export function useComposerDraft({
     const { attachments, text } = takeSessionDraft(activeQueueSessionKey)
     savedDraftRef.current = savedDraft(text, attachments)
     loadIntoComposer(text, attachments, true)
+
+    if (!text.trim() && attachments.length === 0) {
+      // A send its page never finished (the window closed or reloaded mid-send) is this draft.
+      void restoreInterruptedSend(activeQueueSessionKey, retry => {
+        if (draftScopeRef.current !== activeQueueSessionKey || syncDraftFromEditor().trim()) {
+          return false
+        }
+
+        stashAt(activeQueueSessionKey, retry.text, [])
+        rememberDraftRetry(activeQueueSessionKey, retry)
+        loadIntoComposer(retry.text, [])
+
+        return true
+      })
+    }
 
     return () => {
       const latestText = syncDraftFromEditor()

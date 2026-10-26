@@ -17,6 +17,7 @@ import {
 } from '@/store/composer'
 import { type ComposerDraftRetry, draftRetry } from '@/store/composer-draft-retry'
 import { resetBrowseState } from '@/store/composer-input-history'
+import { journalOutgoingSend, type OutgoingSend } from '@/store/composer-outbox'
 import { enqueueQueuedPrompt, type QueuedPromptEntry, serverOwnsComposerQueue } from '@/store/composer-queue'
 import { hasConnectionRequest, skipConnectionRequest } from '@/store/connection-request'
 import { notify } from '@/store/notifications'
@@ -142,6 +143,8 @@ export function useComposerSubmit({
     let restoreScope = submittedScope
     const submittedAttachments = attachments ?? []
 
+    let outgoing: OutgoingSend | undefined
+
     // Only this operation's explicit session.create handoff may re-home a
     // pre-session submit. A null → stored render can also be user navigation.
     const assignment =
@@ -149,6 +152,7 @@ export function useComposerSubmit({
         ? {
             onComposerScopeAssigned: (scope: string) => {
               restoreScope = scope
+              outgoing?.move(scope)
             }
           }
         : {}
@@ -157,6 +161,12 @@ export function useComposerSubmit({
     // (the explicit retry), else a new one. Equal text never inherits an identity, so a new
     // message that repeats an uncertain send, in this pane or another, is its own turn.
     const submissionId = target?.submission_id ?? randomUuid()
+
+    // Journaled before the send chain's first await: closing or reloading the window inside that
+    // chain must not take the words with it (see composer-outbox).
+    outgoing = displayKind
+      ? undefined
+      : journalOutgoingSend(submittedScope, draftRetry(submissionId, text, submittedAttachments))
 
     const restore = () => {
       stashAt(restoreScope, text, submittedAttachments)
@@ -196,6 +206,7 @@ export function useComposerSubmit({
         }
       })
       .catch(rejected)
+      .finally(() => outgoing?.retire())
   }
 
   // External "submit this prompt" requests (e.g. the review pane's agent-ship
