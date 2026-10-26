@@ -53,15 +53,23 @@ vi.mock('@assistant-ui/react', () => ({
 }))
 
 interface Handles {
+  attach: (id: string) => void
   editor: () => string
   submitDraft: () => void
+}
+
+interface PageOptions {
+  /** A turn is running: Enter goes through the busy path (steer by default, or the queue). */
+  busy?: boolean
+  onSteer?: ChatBarProps['onSteer']
+  queueCurrentDraft?: (submissionId?: string) => boolean
 }
 
 let handles: Handles
 
 // One app page: fresh imports of the composer hooks and stores (as a reload or relaunch gets).
 // Opening the session resumes it: the owner's snapshot lists its pending admissions (`pending`).
-async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] = []) {
+async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] = [], options: PageOptions = {}) {
   const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
   const { useComposerDraft } = await import('./use-composer-draft')
   const { useComposerSubmit } = await import('./use-composer-submit')
@@ -84,16 +92,16 @@ async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] =
       ...draft,
       activeQueueSessionKey: 'stored-B',
       attachments,
-      busy: false,
+      busy: options.busy ?? false,
       disabled: false,
       inputDisabled: false,
       drainNextQueued: async () => false,
       exitQueuedEdit: () => false,
       onCancel: () => {},
-      onSteer: async () => false,
+      onSteer: options.onSteer ?? (async () => false),
       onSteerHidden: async () => false,
       onSubmit,
-      queueCurrentDraft: () => false,
+      queueCurrentDraft: options.queueCurrentDraft ?? (() => false),
       queueEdit: null,
       queuedPrompts: [],
       sessionId: 'rt-B'
@@ -101,6 +109,7 @@ async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] =
 
     useLayoutEffect(() => {
       handles = {
+        attach: id => mainComposerScope.add({ id, kind: 'url', label: id, refText: `@url:${id}` }),
         editor: () => composerPlainText(draft.editorRef.current!).trim(),
         submitDraft: submit.submitDraft
       }
@@ -128,8 +137,26 @@ afterEach(() => {
   vi.resetModules()
 })
 
+// Storage.key(i), not Object.keys: the test environment's localStorage enumerates no stored keys.
 const outboxKeys = () =>
-  Object.keys(window.localStorage).filter(key => key.startsWith('hermes:composer-outbox:'))
+  Array.from({ length: window.localStorage.length }, (_, index) => window.localStorage.key(index) ?? '').filter(key =>
+    key.startsWith('hermes:composer-outbox:')
+  )
+
+const saveDraft = (text: string) =>
+  window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
+
+// Enter on `text` (with a url attachment), then the window closes before prompt.submit: the id it sent.
+async function sendThenClose(text: string): Promise<string | undefined> {
+  saveDraft(text)
+  const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
+  await openPage(cutOff)
+  act(() => handles.attach('example.com/a'))
+  act(() => handles.submitDraft())
+  closeWindow()
+
+  return cutOff.mock.calls[0][1]?.submission_id
+}
 
 it('a message sent right before the window closes is never lost and never sent twice', async () => {
   window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': 'answered question' }))
@@ -207,4 +234,50 @@ it('a send the owner admitted before the window closed is never offered again as
     closeWindow()
     window.localStorage.clear()
   }
+})
+
+it('an interrupted send with attachments comes back once, under its id, even when the saved draft kept its words', async () => {
+  // Offered back as text (the attachment did not outlive the page): Enter is still the retry.
+  const offeredId = await sendThenClose('offered words')
+  const offered = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+  await openPage(offered)
+  await waitFor(() => expect(handles.editor()).toBe('offered words'))
+  await act(async () => handles.submitDraft())
+  expect(offered.mock.calls[0][1]?.submission_id).toBe(offeredId)
+  closeWindow()
+  window.localStorage.clear()
+
+  // The saved draft persisted the words before the send cleared the composer (the close raced it).
+  const savedId = await sendThenClose('saved words')
+  saveDraft('saved words')
+  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+  await openPage(reopened)
+  expect(handles.editor()).toBe('saved words')
+  await act(async () => handles.submitDraft())
+  expect(reopened.mock.calls[0][1]?.submission_id).toBe(savedId)
+  closeWindow()
+
+  // Never offered a second time beside the copy that was sent.
+  const later = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+  await openPage(later)
+  await waitFor(() => expect(outboxKeys()).toEqual([]))
+  await act(async () => {})
+  expect(handles.editor()).toBe('')
+})
+
+it('a restored send retried while a turn runs is queued under its id, never steered as a new message', async () => {
+  saveDraft('busy words')
+  const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
+  await openPage(cutOff)
+  act(() => handles.submitDraft())
+  const firstId = cutOff.mock.calls[0][1]?.submission_id
+  closeWindow()
+
+  const onSteer = vi.fn(async () => true)
+  const queueCurrentDraft = vi.fn((_submissionId?: string) => true)
+  await openPage(async () => true, [], { busy: true, onSteer, queueCurrentDraft })
+  await waitFor(() => expect(handles.editor()).toBe('busy words'))
+  await act(async () => handles.submitDraft())
+  expect(onSteer).not.toHaveBeenCalled()
+  expect(queueCurrentDraft).toHaveBeenCalledWith(firstId)
 })

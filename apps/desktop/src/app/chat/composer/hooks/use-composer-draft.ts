@@ -23,10 +23,11 @@ import {
   draftRetryTextMatches,
   matchingDraftRetry,
   readDraftRetry,
+  retryAttachmentIds,
   writeDraftRetry
 } from '@/store/composer-draft-retry'
 import { isBrowsingHistory } from '@/store/composer-input-history'
-import { restoreInterruptedSend } from '@/store/composer-outbox'
+import { adoptInterruptedSend, type InterruptedSendHandlers, restoreInterruptedSend } from '@/store/composer-outbox'
 import { $composerPopout } from '@/store/composer-popout'
 import { migrateQueuedPrompts } from '@/store/composer-queue'
 
@@ -694,32 +695,53 @@ export function useComposerDraft({
     savedDraftRef.current = savedDraft(text, attachments)
     loadIntoComposer(text, attachments, true)
 
-    if (!text.trim() && attachments.length === 0) {
-      // A send its page never finished (the window closed or reloaded mid-send) is this draft.
-      void restoreInterruptedSend(activeQueueSessionKey, retry => {
+    // Takes back a draft that is still exactly `retry`'s send under its identity.
+    const clearRestoredDraft = (retry: ComposerDraftRetry) => {
+      if (
+        draftScopeRef.current !== activeQueueSessionKey ||
+        !draftRetryTextMatches(retry, syncDraftFromEditor()) ||
+        readDraftRetry(activeQueueSessionKey)?.id !== retry.id
+      ) {
+        return
+      }
+
+      stashAt(activeQueueSessionKey, '', [])
+      writeDraftRetry(activeQueueSessionKey, undefined)
+      draftRetryRef.current = undefined
+      loadIntoComposer('', [])
+    }
+
+    const interruptedSend: InterruptedSendHandlers = {
+      offer: retry => {
         if (draftScopeRef.current !== activeQueueSessionKey || syncDraftFromEditor().trim()) {
           return false
         }
 
+        // Re-offered as text: attachment bytes do not outlive the page, so the identity names exactly
+        // what is offered and Enter on it is the explicit retry of that send.
         stashAt(activeQueueSessionKey, retry.text, [])
-        rememberDraftRetry(activeQueueSessionKey, retry)
+        rememberDraftRetry(activeQueueSessionKey, { ...retry, attachmentIds: [] })
         loadIntoComposer(retry.text, [])
 
         return true
-      }, retry => {
-        // The owner listed it after all: take back the offered draft unless the user changed it.
-        if (
-          draftScopeRef.current !== activeQueueSessionKey ||
-          syncDraftFromEditor().trim() !== retry.text.trim() ||
-          readDraftRetry(activeQueueSessionKey)?.id !== retry.id
-        ) {
-          return
-        }
+      },
+      // The adopted saved draft is a copy of a send the owner already holds.
+      landed: clearRestoredDraft,
+      // The owner listed the offered send after all.
+      withdraw: clearRestoredDraft
+    }
 
-        stashAt(activeQueueSessionKey, '', [])
-        writeDraftRetry(activeQueueSessionKey, undefined)
-        loadIntoComposer('', [])
-      })
+    // The saved draft can already be an interrupted send's words (persisted before the send cleared
+    // the composer): it takes that send's identity before Enter could mint a second one.
+    const adopted = adoptInterruptedSend(activeQueueSessionKey, text, interruptedSend)
+
+    if (adopted && !draftRetryTextMatches(draftRetryRef.current, text)) {
+      rememberDraftRetry(activeQueueSessionKey, { ...adopted, attachmentIds: retryAttachmentIds(attachments) })
+    }
+
+    if (!text.trim() && attachments.length === 0) {
+      // A send its page never finished (the window closed or reloaded mid-send) is this draft.
+      void restoreInterruptedSend(activeQueueSessionKey, interruptedSend)
     }
 
     return () => {

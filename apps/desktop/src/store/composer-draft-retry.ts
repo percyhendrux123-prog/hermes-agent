@@ -16,10 +16,11 @@ export interface ComposerDraftRetry {
 // storage with last-writer-wins per KEY, so one window never drops another's.
 const RETRY_PREFIX = 'hermes:composer-draft-retry:v1:'
 
-const attachmentIds = (attachments: ComposerAttachment[]) => attachments.map(a => a.occurrenceId ?? a.id)
+/** The identity half of a draft's attachments (what `matchingDraftRetry` compares). */
+export const retryAttachmentIds = (attachments: ComposerAttachment[]) => attachments.map(a => a.occurrenceId ?? a.id)
 
 export function draftRetry(id: string, text: string, attachments: ComposerAttachment[]): ComposerDraftRetry {
-  return { id, text, attachmentIds: attachmentIds(attachments) }
+  return { id, text, attachmentIds: retryAttachmentIds(attachments) }
 }
 
 export function draftRetryTextMatches(retry: ComposerDraftRetry | undefined, text: string): boolean {
@@ -34,7 +35,7 @@ export function matchingDraftRetry(
 ): ComposerDraftRetry | undefined {
   return retry &&
     draftRetryTextMatches(retry, text) &&
-    JSON.stringify(retry.attachmentIds) === JSON.stringify(attachmentIds(attachments))
+    JSON.stringify(retry.attachmentIds) === JSON.stringify(retryAttachmentIds(attachments))
     ? retry
     : undefined
 }

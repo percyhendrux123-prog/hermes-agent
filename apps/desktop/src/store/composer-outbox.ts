@@ -1,6 +1,6 @@
 import { onListedSubmissions } from './admitted-submissions'
 import { freshDraftScope } from './composer'
-import type { ComposerDraftRetry } from './composer-draft-retry'
+import { type ComposerDraftRetry, draftRetryTextMatches } from './composer-draft-retry'
 import { sendLanded } from './composer-outbox-landed'
 
 // Enter clears the composer and hands the words to an async send chain (session resume or create,
@@ -15,13 +15,19 @@ import { sendLanded } from './composer-outbox-landed'
 // already admitted (the window closed after the frame left but before the ack came back) is in the
 // owner's pending snapshot or stored transcript under its submission id: it is dropped instead, so
 // a send is never both shown and offered again.
+//
+// The saved draft can already hold the same words (main's draft persistence wrote them before the
+// send cleared the composer). Then the entry hands that draft its identity instead of being offered
+// later beside it: two copies of one send, each with its own id, would both run.
 const PREFIX = 'hermes:composer-outbox:v1:'
+// An entry older than this is no longer a send the user is waiting on: dropped, never offered.
+const ENTRY_TTL_MS = 24 * 60 * 60_000
 
 interface OutboxEntry {
   scope: string
   retry: ComposerDraftRetry
-  /** When Enter journaled it (ms): bounds the transcript search for its stored row. */
-  at?: number
+  /** When Enter journaled it (ms): bounds the transcript search for its stored row and its lifetime. */
+  at: number
 }
 
 // Journal keys of sends this page has in flight: key -> release of the Web Lock that marks the
@@ -38,7 +44,13 @@ function read(key: string): OutboxEntry | undefined {
   try {
     const entry = JSON.parse(window.localStorage.getItem(key) || 'null') as OutboxEntry | null
 
-    return entry && typeof entry.scope === 'string' && typeof entry.retry?.text === 'string' ? entry : undefined
+    return entry &&
+      typeof entry.scope === 'string' &&
+      typeof entry.retry?.text === 'string' &&
+      typeof entry.at === 'number' &&
+      Date.now() - entry.at < ENTRY_TTL_MS
+      ? entry
+      : undefined
   } catch {
     return undefined
   }
@@ -117,25 +129,96 @@ function withdrawOnceListed(entry: OutboxEntry, withdraw: (retry: ComposerDraftR
   })
 }
 
-/** Offer `scope`'s interrupted send (one no live page owns) to `apply`; the entry is removed when
- *  its send already landed in the stored transcript (silently) or when `apply` took it, so a
- *  composer the user already typed into leaves it for the next load. */
-export async function restoreInterruptedSend(
-  scope: string | null | undefined,
-  apply: (retry: ComposerDraftRetry) => boolean,
-  withdraw: (retry: ComposerDraftRetry) => void
-): Promise<void> {
-  const target = scopeKey(scope)
+/** Outbox keys no live page of this window holds, oldest first. Expired or unreadable entries are
+ *  deleted on the way (`scope` given: only that scope's are returned). */
+function orphanKeys(scope?: string): string[] {
   const keys: string[] = []
+  const dead: string[] = []
 
   for (let index = 0; index < window.localStorage.length; index += 1) {
     const key = window.localStorage.key(index)
 
-    if (key?.startsWith(PREFIX) && !ownedHere.has(key) && read(key)?.scope === target) {
+    if (!key?.startsWith(PREFIX) || ownedHere.has(key)) {
+      continue
+    }
+
+    const entry = read(key)
+
+    if (!entry) {
+      dead.push(key)
+    } else if (scope === undefined || entry.scope === scope) {
       keys.push(key)
     }
   }
 
+  dead.forEach(key => write(key, undefined))
+
+  return keys.sort()
+}
+
+/** Stored-session scopes with an interrupted send (the dead-session prune probes these). */
+export function interruptedSendScopes(): string[] {
+  return [...new Set(orphanKeys().flatMap(key => read(key)?.scope ?? []))]
+}
+
+/** The session is gone: its interrupted sends can never be offered again. */
+export function dropInterruptedSends(scope: string): void {
+  orphanKeys(scope).forEach(key => write(key, undefined))
+}
+
+export interface InterruptedSendHandlers {
+  /** Put the send in the (empty) composer; false leaves the entry for a later load. */
+  offer: (retry: ComposerDraftRetry) => boolean
+  /** The owner already holds an adopted send: drop a draft that still is exactly those words. */
+  landed: (retry: ComposerDraftRetry) => void
+  /** The owner listed it after it was offered: take the offered draft back if untouched. */
+  withdraw: (retry: ComposerDraftRetry) => void
+}
+
+// Offered or adopted: the composer now holds the send under its identity. Its landed check still
+// runs, so a copy of a send the owner holds is taken back instead of inviting a second Enter.
+async function settleTaken(entry: OutboxEntry, { landed, withdraw }: InterruptedSendHandlers): Promise<void> {
+  if (await sendLanded(entry.scope, entry.retry.id, entry.at)) {
+    landed(entry.retry)
+  } else {
+    withdrawOnceListed(entry, withdraw)
+  }
+}
+
+/** The saved draft `text` already brought an interrupted send of `scope` back (it was persisted
+ *  before the send cleared the composer): hand back that send's identity for the draft, synchronously
+ *  so no Enter can mint a second one, and retire the entry so it is never offered beside it. */
+export function adoptInterruptedSend(
+  scope: string | null | undefined,
+  text: string,
+  handlers: InterruptedSendHandlers
+): ComposerDraftRetry | undefined {
+  if (!text.trim()) {
+    return undefined
+  }
+
+  const key = orphanKeys(scopeKey(scope)).find(key => draftRetryTextMatches(read(key)?.retry, text))
+  const entry = key ? read(key) : undefined
+
+  if (!key || !entry) {
+    return undefined
+  }
+
+  // Not lock-guarded: a peer window offering or still sending this entry uses the same id, so the
+  // owner deduplicates whichever copy is sent.
+  write(key, undefined)
+  void settleTaken(entry, handlers)
+
+  return entry.retry
+}
+
+/** Offer `scope`'s interrupted sends (ones no live page owns) to an empty composer: an entry is
+ *  removed when its send already landed in the stored transcript or when `offer` took it, so a
+ *  composer the user already typed into leaves it for the next load. */
+export async function restoreInterruptedSend(
+  scope: string | null | undefined,
+  handlers: InterruptedSendHandlers
+): Promise<void> {
   const take = async (key: string) => {
     const entry = read(key)
 
@@ -145,15 +228,15 @@ export async function restoreInterruptedSend(
 
     if (await sendLanded(entry.scope, entry.retry.id, entry.at)) {
       write(key, undefined)
-    } else if (read(key) && apply(entry.retry)) {
+    } else if (read(key) && handlers.offer(entry.retry)) {
       write(key, undefined)
-      withdrawOnceListed(entry, withdraw)
+      withdrawOnceListed(entry, handlers.withdraw)
     }
   }
 
   const available = locks()
 
-  for (const key of keys.sort()) {
+  for (const key of orphanKeys(scopeKey(scope))) {
     if (!available) {
       await take(key)
     } else {

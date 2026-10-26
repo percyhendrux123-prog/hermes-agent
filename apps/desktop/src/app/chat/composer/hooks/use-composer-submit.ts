@@ -67,7 +67,8 @@ interface UseComposerSubmitArgs {
   onSteer: ChatBarProps['onSteer']
   onSteerHidden: ChatBarProps['onSteerHidden']
   onSubmit: ChatBarProps['onSubmit']
-  queueCurrentDraft: () => boolean | Promise<boolean>
+  /** `submissionId`: the restored send this draft retries, so the owner deduplicates it. */
+  queueCurrentDraft: (submissionId?: string) => boolean | Promise<boolean>
   queueEdit: QueueEditState | null
   queuedPrompts: QueuedPromptEntry[]
   sessionId: string | null | undefined
@@ -296,6 +297,19 @@ export function useComposerSubmit({
     }
   }
 
+  // A restored send retried while the session is busy keeps its identity: it is admitted as the next
+  // turn under that submission id (never a steer, which carries none), so the owner deduplicates it
+  // against the interrupted original. A refused enqueue leaves the draft, and gives it back its id.
+  const queueRetry = (retry: ComposerDraftRetry) => {
+    const scope = draftScopeRef.current
+
+    void Promise.resolve(queueCurrentDraft(retry.id)).then(queued => {
+      if (!queued) {
+        rememberDraftRetry?.(scope, retry)
+      }
+    })
+  }
+
   // Returns false when the submit was refused and must not refocus the input.
   const submitWhileBusy = (text: string, payloadPresent: boolean, blockingPrompt: boolean) => {
     // Slash commands should execute immediately even while the agent is
@@ -323,6 +337,14 @@ export function useComposerSubmit({
       triggerHaptic('submit')
       clearDraft()
       dispatchSubmit(text, undefined, undefined, retry && { submission_id: retry.id })
+
+      return true
+    }
+
+    const retry = payloadPresent ? takeDraftRetry?.(text, cloneAttachments(attachments)) : undefined
+
+    if (retry) {
+      queueRetry(retry)
     } else if (!blockingPrompt && !attachments.length && text.trim()) {
       // Busy Send follows the backend busy-input policy: interrupt redirects
       // the live turn (Cursor-style stop-and-correct), steer injects at the
@@ -585,7 +607,14 @@ export function useComposerSubmit({
     }
 
     const editorHadFocus = editorHasFocus()
-    queueCurrentDraft()
+    const retry = takeDraftRetry?.(draftRef.current, cloneAttachments(attachments))
+
+    if (retry) {
+      queueRetry(retry)
+    } else {
+      queueCurrentDraft()
+    }
+
     refocusAfterSend(editorHadFocus)
   }
 
