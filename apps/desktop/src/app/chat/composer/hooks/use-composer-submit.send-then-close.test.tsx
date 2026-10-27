@@ -143,6 +143,11 @@ const outboxKeys = () =>
     key.startsWith('hermes:composer-outbox:')
   )
 
+// The notice that a restored send came back without its attachments (this page's notification store).
+const attachmentsNotice = async () =>
+  (await import('@/store/notifications')).$notifications.get().find(notice => notice.id === 'restored-draft-attachments')
+    ?.message
+
 const saveDraft = (text: string) =>
   window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
 
@@ -171,6 +176,7 @@ it('a message sent right before the window closes is never lost and never sent t
   await openPage(relaunched)
   await act(async () => {})
   expect(handles.editor()).toBe('')
+  expect(await attachmentsNotice()).toBeUndefined()
   closeWindow()
 
   // Enter, then the window closes before the send chain reaches prompt.submit.
@@ -242,6 +248,7 @@ it('an interrupted send with attachments comes back once, under its id, even whe
   const offered = vi.fn<ChatBarProps['onSubmit']>(async () => true)
   await openPage(offered)
   await waitFor(() => expect(handles.editor()).toBe('offered words'))
+  expect(await attachmentsNotice()).toBe("Attachments from your unsent message weren't restored. Attach them again before you send it.")
   await act(async () => handles.submitDraft())
   expect(offered.mock.calls[0][1]?.submission_id).toBe(offeredId)
   closeWindow()
@@ -253,6 +260,7 @@ it('an interrupted send with attachments comes back once, under its id, even whe
   const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
   await openPage(reopened)
   expect(handles.editor()).toBe('saved words')
+  expect(await attachmentsNotice()).toBeTruthy()
   await act(async () => handles.submitDraft())
   expect(reopened.mock.calls[0][1]?.submission_id).toBe(savedId)
   closeWindow()
@@ -283,6 +291,7 @@ it('an interrupted send with attachments comes back once, under its id, even whe
   const retried = vi.fn<ChatBarProps['onSubmit']>(async () => true)
   await openPage(retried)
   expect(handles.editor()).toBe('unknown words')
+  expect(await attachmentsNotice()).toBeTruthy()
   await act(async () => handles.submitDraft())
   expect(retried.mock.calls[0][1]?.submission_id).toBe(timedOut.mock.calls[0][1]?.submission_id)
 })

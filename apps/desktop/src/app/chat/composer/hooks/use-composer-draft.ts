@@ -3,6 +3,7 @@ import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { isElementInHiddenPane } from '@/components/pane-shell/pane-visibility'
+import { translateNow } from '@/i18n'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { isTouchInteraction } from '@/lib/touch-interaction'
 import { useStoreSelector } from '@/lib/use-session-slice'
@@ -31,6 +32,7 @@ import { isBrowsingHistory } from '@/store/composer-input-history'
 import { adoptInterruptedSend, type InterruptedSendHandlers, restoreInterruptedSend } from '@/store/composer-outbox'
 import { $composerPopout } from '@/store/composer-popout'
 import { migrateQueuedPrompts } from '@/store/composer-queue'
+import { notify } from '@/store/notifications'
 
 import { type ComposerStoreWriter, createComposerStoreWriter } from '../composer-store-writer'
 import {
@@ -89,6 +91,20 @@ interface UseComposerDraftArgs {
   inputDisabled: boolean
   queueEditRef: RefObject<QueueEditState | null>
   sessionId: string | null | undefined
+}
+
+// A send restored after its page died comes back as its words: attachment bytes do not outlive the
+// page. Say so, or the user takes the restored draft for the whole message and sends it without them.
+function noteAttachmentsNotRestored(retry: ComposerDraftRetry | undefined) {
+  if (retry?.attachmentIds.length) {
+    notify({
+      id: 'restored-draft-attachments',
+      kind: 'warning',
+      message: translateNow('promptNotices.restoredDraftAttachmentsDropped'),
+      // Raised while the chat opens: opening a chat clears the last chat's notices right after.
+      persistent: true
+    })
+  }
 }
 
 /**
@@ -690,12 +706,18 @@ export function useComposerDraft({
     }
 
     draftScopeRef.current = activeQueueSessionKey
-    draftRetryRef.current = readDraftRetry(activeQueueSessionKey)
+    const storedRetry = readDraftRetry(activeQueueSessionKey)
 
     const { attachments, text } = takeSessionDraft(activeQueueSessionKey)
     savedDraftRef.current = savedDraft(text, attachments)
-    draftRetryRef.current = loadedDraftRetry(draftRetryRef.current, text, attachments)
+    draftRetryRef.current = loadedDraftRetry(storedRetry, text, attachments)
     loadIntoComposer(text, attachments, true)
+
+    if (draftRetryRef.current && draftRetryRef.current !== storedRetry) {
+      // Recorded text-only, so the notice is said once, not again on every return to this chat.
+      writeDraftRetry(activeQueueSessionKey, draftRetryRef.current)
+      noteAttachmentsNotRestored(storedRetry)
+    }
 
     // Takes back a draft that is still exactly `retry`'s send under its identity.
     const clearRestoredDraft = (retry: ComposerDraftRetry) => {
@@ -724,6 +746,7 @@ export function useComposerDraft({
         stashAt(activeQueueSessionKey, retry.text, [])
         rememberDraftRetry(activeQueueSessionKey, { ...retry, attachmentIds: [] })
         loadIntoComposer(retry.text, [])
+        noteAttachmentsNotRestored(retry)
 
         return true
       },
@@ -739,6 +762,12 @@ export function useComposerDraft({
 
     if (adopted && !draftRetryTextMatches(draftRetryRef.current, text)) {
       rememberDraftRetry(activeQueueSessionKey, { ...adopted, attachmentIds: retryAttachmentIds(attachments) })
+    }
+
+    // The saved draft can already carry a text-only identity for these words; the journaled send
+    // still names the attachments the reload dropped.
+    if (adopted && !attachments.length) {
+      noteAttachmentsNotRestored(adopted)
     }
 
     if (!text.trim() && attachments.length === 0) {
