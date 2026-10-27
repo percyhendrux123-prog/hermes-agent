@@ -34,12 +34,13 @@ const composer = vi.hoisted(() => {
 })
 
 // The stored transcript the owner serves for a session (the REST page the outbox reads on reopen).
-const transcript = vi.hoisted(() => ({ rows: new Map<string, unknown[]>() }))
+// `gate` holds the owner's answer (the recovery check is asynchronous) until a test releases it.
+const transcript = vi.hoisted(() => ({ gate: Promise.resolve(), rows: new Map<string, unknown[]>() }))
 
 vi.mock('@/api/sessions', async importOriginal => ({
   ...(await importOriginal<object>()),
   getSessionMessages: async (id: string) => ({
-    messages: transcript.rows.get(id) ?? [],
+    messages: await transcript.gate.then(() => transcript.rows.get(id) ?? []),
     pagination: { limit: 200, offset: 0, order: 'latest' },
     session_id: id
   })
@@ -134,6 +135,7 @@ afterEach(() => {
   cleanup()
   window.localStorage.clear()
   transcript.rows.clear()
+  transcript.gate = Promise.resolve()
   vi.resetModules()
 })
 
@@ -321,4 +323,38 @@ it('a restored send retried while a turn runs is queued under its id, never stee
   await act(async () => handles.submitDraft())
   expect(onSteer).not.toHaveBeenCalled()
   expect(queueCurrentDraft).toHaveBeenCalledWith(firstId)
+})
+
+it('recovery never discards a file the user attached while it was running', async () => {
+  const attached = async () =>
+    (await import('@/store/composer')).mainComposerScope.$attachments.get().map(attachment => attachment.id)
+
+  // Attached while the owner check is still pending: the offer would replace the composer.
+  await sendThenClose('held words')
+
+  let answer = () => {}
+  transcript.gate = new Promise<void>(resolve => (answer = resolve))
+  await openPage(vi.fn<ChatBarProps['onSubmit']>(async () => true))
+  act(() => handles.attach('new-file.txt'))
+  await act(async () => answer())
+  await act(async () => {})
+  expect(await attached()).toEqual(['new-file.txt'])
+  closeWindow()
+  window.localStorage.clear()
+
+  // Attached to the offered draft, then a late snapshot lists the original send: the take-back
+  // would clear the whole composer.
+  const lateId = await sendThenClose('late words')
+  await openPage(vi.fn<ChatBarProps['onSubmit']>(async () => true))
+  await waitFor(() => expect(handles.editor()).toBe('late words'))
+  act(() => handles.attach('new-file.txt'))
+  const { reconcilePendingSubmissions } = await import('@/store/pending-submissions')
+  act(() =>
+    reconcilePendingSubmissions('stored-B', [
+      { admission_id: 'adm-1', input_id: lateId, status: 'queued', text: 'late words' }
+    ])
+  )
+  await act(async () => {})
+  expect(await attached()).toEqual(['new-file.txt'])
+  expect(handles.editor()).toBe('late words')
 })

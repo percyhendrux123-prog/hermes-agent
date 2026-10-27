@@ -719,12 +719,15 @@ export function useComposerDraft({
       noteAttachmentsNotRestored(storedRetry)
     }
 
-    // Takes back a draft that is still exactly `retry`'s send under its identity.
+    // Takes back a draft that is still exactly `retry`'s send under its identity: words AND
+    // attachments, since a file attached after the offer makes it the user's new message.
     const clearRestoredDraft = (retry: ComposerDraftRetry) => {
+      const stored = readDraftRetry(activeQueueSessionKey)
+
       if (
         draftScopeRef.current !== activeQueueSessionKey ||
-        !draftRetryTextMatches(retry, syncDraftFromEditor()) ||
-        readDraftRetry(activeQueueSessionKey)?.id !== retry.id
+        stored?.id !== retry.id ||
+        !matchingDraftRetry(stored, syncDraftFromEditor(), attachmentScope.$attachments.get())
       ) {
         return
       }
@@ -737,7 +740,13 @@ export function useComposerDraft({
 
     const interruptedSend: InterruptedSendHandlers = {
       offer: retry => {
-        if (draftScopeRef.current !== activeQueueSessionKey || syncDraftFromEditor().trim()) {
+        // Re-read after the owner check: anything typed or attached meanwhile keeps the composer,
+        // and the send stays journaled for a later load.
+        if (
+          draftScopeRef.current !== activeQueueSessionKey ||
+          syncDraftFromEditor().trim() ||
+          attachmentScope.$attachments.get().length > 0
+        ) {
           return false
         }
 
