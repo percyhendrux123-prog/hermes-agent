@@ -145,11 +145,15 @@ const outboxKeys = () =>
 
 // The notice that a restored send came back without its attachments (this page's notification store).
 const attachmentsNotice = async () =>
-  (await import('@/store/notifications')).$notifications.get().find(notice => notice.id === 'restored-draft-attachments')
-    ?.message
+  (await import('@/store/notifications')).$notifications
+    .get()
+    .find(notice => notice.id === 'restored-draft-attachments')?.message
 
-const saveDraft = (text: string) =>
+// Seeds the draft as a first launch reads it: the v3 list counts only before any page wrote the v4 stash.
+const saveDraft = (text: string) => {
+  window.localStorage.removeItem('hermes:composer-drafts:v4')
   window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
+}
 
 // Enter on `text` (with a url attachment), then the window closes before prompt.submit: the id it sent.
 async function sendThenClose(text: string): Promise<string | undefined> {
@@ -164,7 +168,7 @@ async function sendThenClose(text: string): Promise<string | undefined> {
 }
 
 it('a message sent right before the window closes is never lost and never sent twice', async () => {
-  window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': 'answered question' }))
+  saveDraft('answered question')
 
   // Control: an acknowledged send leaves nothing behind for the next page.
   await openPage(async () => true)
@@ -180,7 +184,7 @@ it('a message sent right before the window closes is never lost and never sent t
   closeWindow()
 
   // Enter, then the window closes before the send chain reaches prompt.submit.
-  window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': 'my long question' }))
+  saveDraft('my long question')
   const cutOff = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
   await openPage(cutOff)
   act(() => handles.submitDraft())
@@ -211,11 +215,15 @@ it('a send the owner admitted before the window closed is never offered again as
     ran: (id: string) => ({ row: { content: 'ran one', display_metadata: { submission_id: id }, role: 'user' } })
   }
 
-  const cases = [['ran one', landed.ran], ['queued one', landed.queued], ['late one', landed.late]] as const
+  const cases = [
+    ['ran one', landed.ran],
+    ['queued one', landed.queued],
+    ['late one', landed.late]
+  ] as const
 
   for (const [text, owner] of cases) {
     // Enter, the frame reaches the owner, and the window closes before the ack comes back.
-    window.localStorage.setItem('hermes:composer-drafts:v3', JSON.stringify({ 'stored-B': text }))
+    saveDraft(text)
     const unacked = vi.fn<ChatBarProps['onSubmit']>(() => new Promise<boolean>(() => {}))
     await openPage(unacked)
     act(() => handles.submitDraft())
@@ -248,7 +256,9 @@ it('an interrupted send with attachments comes back once, under its id, even whe
   const offered = vi.fn<ChatBarProps['onSubmit']>(async () => true)
   await openPage(offered)
   await waitFor(() => expect(handles.editor()).toBe('offered words'))
-  expect(await attachmentsNotice()).toBe("Attachments from your unsent message weren't restored. Attach them again before you send it.")
+  expect(await attachmentsNotice()).toBe(
+    "Attachments from your unsent message weren't restored. Attach them again before you send it."
+  )
   await act(async () => handles.submitDraft())
   expect(offered.mock.calls[0][1]?.submission_id).toBe(offeredId)
   closeWindow()
