@@ -19,6 +19,7 @@ import {
   migrateQueuedPrompts,
   promoteQueuedPrompt,
   type QueuedPromptEntry,
+  queuedSubmissionId,
   removeQueuedPrompt,
   resolveQueuedPromptTransport,
   serverOwnsComposerQueue,
@@ -525,7 +526,7 @@ export function useComposerQueue({
               ...(resolved.displayText ? { displayText: resolved.displayText } : {}),
               ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
               fromQueue: true,
-              submission_id: entry.id,
+              submission_id: queuedSubmissionId(entry),
               sessionId: drainRuntimeSessionId,
               storedSessionId: drainQueueSessionKey
             })

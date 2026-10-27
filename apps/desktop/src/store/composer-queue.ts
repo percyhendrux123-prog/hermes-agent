@@ -57,9 +57,17 @@ export interface QueuedPromptEntry {
    *  A user gesture — manual send, redirect, queueing a fresh prompt — clears
    *  it, exactly like the composer's in-process counter. */
   drainFailures?: number
+  /** The submission id a local entry drains under once its words or attachments were edited (else
+   *  `id`). The first drain may already be admitted with its ack lost: under that id the edit would
+   *  read as the original's retry and settle as delivered without ever running. */
+  submissionId?: string
   attachments: ComposerAttachment[]
   queuedAt: number
 }
+
+/** The `submission_id` a queued entry is sent (and matched against the owner's admissions) under. */
+export const queuedSubmissionId = (entry: Pick<QueuedPromptEntry, 'id' | 'submissionId'>): string =>
+  entry.submissionId ?? entry.id
 
 export interface EnqueueQueuedPromptPayload {
   /** Stable id to reuse (a canonical submission id), else one is minted. */
@@ -327,6 +335,14 @@ const nextId = () => `queued-${Date.now()}-${Math.random().toString(36).slice(2,
 
 const cloneAttachments = (attachments: ComposerAttachment[]) => attachments.map(a => ({ ...a }))
 
+const attachmentKeys = (attachments: ComposerAttachment[]) => JSON.stringify(attachments.map(a => a.id))
+
+// An edited local entry is a new message: it drains under a fresh submission id (see `submissionId`).
+const editedSubmission = (entry: QueuedPromptEntry, text: string, attachments: ComposerAttachment[]) =>
+  !entry.serverStatus && (entry.text !== text || attachmentKeys(entry.attachments) !== attachmentKeys(attachments))
+    ? { submissionId: crypto.randomUUID() }
+    : {}
+
 export const getQueuedPrompts = (key: string | null | undefined): QueuedPromptEntry[] => {
   const sid = sidOf(key)
 
@@ -561,6 +577,7 @@ export const updateQueuedPrompt = (
 
       return {
         ...rest,
+        ...editedSubmission(entry, update.text, attachments),
         text: update.text,
         attachments,
         ...(nextDisplay ? { displayText: nextDisplay } : {})

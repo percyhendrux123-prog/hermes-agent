@@ -1,5 +1,5 @@
 import { noteListedSubmissions } from './admitted-submissions'
-import { getQueuedPrompts, type QueuedPromptEntry, writeSessionQueue } from './composer-queue'
+import { getQueuedPrompts, type QueuedPromptEntry, queuedSubmissionId, writeSessionQueue } from './composer-queue'
 import { $sessions, resolveComposerSessionKey } from './session'
 
 // One localStorage key per (session, admission). Every Desktop window of the origin shares this
@@ -246,7 +246,8 @@ function projectQueue(
   const next: QueuedPromptEntry[] = []
 
   for (const entry of current) {
-    const receipt = receipts.get(admissionByInput.get(entry.id) ?? entry.id)
+    const submissionId = queuedSubmissionId(entry)
+    const receipt = receipts.get(admissionByInput.get(submissionId) ?? submissionId)
 
     if (receipt) {
       if (receipt.status !== 'started') {
