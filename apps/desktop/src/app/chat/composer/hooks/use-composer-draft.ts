@@ -533,6 +533,29 @@ export function useComposerDraft({
     }, DRAFT_PERSIST_DEBOUNCE_MS)
   }
 
+  // A file removed from (or added to) a restored draft makes it a new message too. Dropping the
+  // identity here, not at the next load, matters: a reload legitimately loses a draft's files, so a
+  // later load cannot tell a removal from that and would resend the removed file under the old id.
+  useEffect(
+    () =>
+      attachmentScope.$attachments.listen(attachments => {
+        const retry = draftRetryRef.current
+
+        if (
+          !retry ||
+          queueEditRef.current ||
+          isBrowsingHistory(sessionIdRef.current) ||
+          retry.attachmentIds.join('\n') === retryAttachmentIds(attachments).join('\n')
+        ) {
+          return
+        }
+
+        draftRetryRef.current = undefined
+        writeDraftRetry(draftScopeRef.current, undefined)
+      }),
+    [attachmentScope, queueEditRef]
+  )
+
   const scheduleDraftPersistRef = useRef(scheduleDraftPersist)
   scheduleDraftPersistRef.current = scheduleDraftPersist
 

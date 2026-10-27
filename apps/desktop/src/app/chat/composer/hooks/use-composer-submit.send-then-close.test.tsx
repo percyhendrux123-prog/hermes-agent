@@ -55,6 +55,7 @@ vi.mock('@assistant-ui/react', () => ({
 
 interface Handles {
   attach: (id: string) => void
+  detach: (id: string) => void
   editor: () => string
   submitDraft: () => void
 }
@@ -111,6 +112,7 @@ async function openPage(onSubmit: ChatBarProps['onSubmit'], pending: unknown[] =
     useLayoutEffect(() => {
       handles = {
         attach: id => mainComposerScope.add({ id, kind: 'url', label: id, refText: `@url:${id}` }),
+        detach: id => mainComposerScope.remove(id),
         editor: () => composerPlainText(draft.editorRef.current!).trim(),
         submitDraft: submit.submitDraft
       }
@@ -374,4 +376,25 @@ it('equal words typed again after an interrupted send are a new message, never t
   expect(handles.editor()).toBe('same words')
   await act(async () => handles.submitDraft())
   expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(firstId)
+}, 30_000)
+
+it('a file removed from a given-back draft is never resent under the old send', async () => {
+  saveDraft('trimmed words')
+
+  const timedOut = vi.fn<ChatBarProps['onSubmit']>(async () => {
+    throw new Error('request timed out')
+  })
+
+  await openPage(timedOut)
+  act(() => handles.attach('example.com/c'))
+  await act(async () => handles.submitDraft())
+  await waitFor(() => expect(handles.editor()).toBe('trimmed words'))
+  act(() => handles.detach('example.com/c'))
+  closeWindow()
+
+  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+  await openPage(reopened)
+  await act(async () => handles.submitDraft())
+  expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(timedOut.mock.calls[0][1]?.submission_id)
+  expect(await attachmentsNotice()).toBeUndefined()
 }, 30_000)
