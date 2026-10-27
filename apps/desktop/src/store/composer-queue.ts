@@ -338,8 +338,18 @@ const cloneAttachments = (attachments: ComposerAttachment[]) => attachments.map(
 const attachmentKeys = (attachments: ComposerAttachment[]) => JSON.stringify(attachments.map(a => a.id))
 
 // An edited local entry is a new message: it drains under a fresh submission id (see `submissionId`).
-const editedSubmission = (entry: QueuedPromptEntry, text: string, attachments: ComposerAttachment[]) =>
-  !entry.serverStatus && (entry.text !== text || attachmentKeys(entry.attachments) !== attachmentKeys(attachments))
+// The frozen `@terminal` transport is part of what is sent: a new selection behind the same chip text
+// changes the payload, so under the old id it would read as the original's retry and be dropped.
+const editedSubmission = (
+  entry: QueuedPromptEntry,
+  text: string,
+  attachments: ComposerAttachment[],
+  previousTransport: string | undefined
+) =>
+  !entry.serverStatus &&
+  (entry.text !== text ||
+    attachmentKeys(entry.attachments) !== attachmentKeys(attachments) ||
+    (previousTransport?.trim() ?? '') !== (frozenQueuedTransportById.get(entry.id)?.trim() ?? ''))
     ? { submissionId: randomUuid() }
     : {}
 
@@ -557,6 +567,7 @@ export const updateQueuedPrompt = (
       }
 
       changed = true
+      const previousTransport = frozenQueuedTransportById.get(entry.id)
 
       if (update.frozenTransport !== undefined) {
         const nextFrozen = update.frozenTransport?.trim() ?? ''
@@ -577,7 +588,7 @@ export const updateQueuedPrompt = (
 
       return {
         ...rest,
-        ...editedSubmission(entry, update.text, attachments),
+        ...editedSubmission(entry, update.text, attachments, previousTransport),
         text: update.text,
         attachments,
         ...(nextDisplay ? { displayText: nextDisplay } : {})
