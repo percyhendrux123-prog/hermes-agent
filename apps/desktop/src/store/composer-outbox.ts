@@ -1,5 +1,5 @@
 import { onListedSubmissions } from './admitted-submissions'
-import { freshDraftScope } from './composer'
+import { draftKey as scopeKey } from './composer'
 import { type ComposerDraftRetry, draftRetryTextMatches } from './composer-draft-retry'
 import { sendLanded } from './composer-outbox-landed'
 
@@ -35,7 +35,6 @@ interface OutboxEntry {
 // entry as owned by a live page for every other window of the origin.
 const ownedHere = new Map<string, () => void>()
 
-const scopeKey = (scope: string | null | undefined) => scope?.trim() || freshDraftScope()
 const entryKey = (scope: string, id: string) => `${PREFIX}${JSON.stringify([scope, id])}`
 const lockName = (key: string) => `${key}:owner`
 
@@ -186,31 +185,51 @@ async function settleTaken(entry: OutboxEntry, { landed, withdraw }: Interrupted
   }
 }
 
-/** The saved draft `text` already brought an interrupted send of `scope` back (it was persisted
- *  before the send cleared the composer): hand back that send's identity for the draft, synchronously
- *  so no Enter can mint a second one, and retire the entry so it is never offered beside it. */
-export function adoptInterruptedSend(
+/** The saved draft `text` (written at `savedAt`) already brought an interrupted send of `scope` back:
+ *  it was persisted before the send cleared the composer. `adopt` hands that send's identity to the
+ *  draft (false: the composer changed meanwhile, the entry stays for a later load) and the entry is
+ *  retired so it is never offered beside it.
+ *
+ *  Only a draft saved before the send counts: equal words typed again later are a new message. And
+ *  only under the entry's Web Lock, like `restoreInterruptedSend`: a held lock is a live window's send
+ *  still in flight, never a copy this draft may take over. */
+export async function adoptInterruptedSend(
   scope: string | null | undefined,
   text: string,
-  handlers: InterruptedSendHandlers
-): ComposerDraftRetry | undefined {
-  if (!text.trim()) {
-    return undefined
+  savedAt: number | undefined,
+  handlers: InterruptedSendHandlers & { adopt: (retry: ComposerDraftRetry) => boolean }
+): Promise<void> {
+  if (!text.trim() || savedAt === undefined) {
+    return
   }
 
-  const key = orphanKeys(scopeKey(scope)).find(key => draftRetryTextMatches(read(key)?.retry, text))
-  const entry = key ? read(key) : undefined
+  const savedBefore = (entry: OutboxEntry | undefined): entry is OutboxEntry =>
+    Boolean(entry && savedAt <= entry.at && draftRetryTextMatches(entry.retry, text))
 
-  if (!key || !entry) {
-    return undefined
+  const take = (key: string) => {
+    const entry = read(key)
+
+    if (!ownedHere.has(key) && savedBefore(entry) && handlers.adopt(entry.retry)) {
+      write(key, undefined)
+      void settleTaken(entry, handlers)
+
+      return true
+    }
+
+    return false
   }
 
-  // Not lock-guarded: a peer window offering or still sending this entry uses the same id, so the
-  // owner deduplicates whichever copy is sent.
-  write(key, undefined)
-  void settleTaken(entry, handlers)
+  const available = locks()
 
-  return entry.retry
+  for (const key of orphanKeys(scopeKey(scope)).filter(key => savedBefore(read(key)))) {
+    const taken = available
+      ? await available.request(lockName(key), { ifAvailable: true }, lock => Boolean(lock && take(key)))
+      : take(key)
+
+    if (taken) {
+      return
+    }
+  }
 }
 
 /** Offer `scope`'s interrupted sends (ones no live page owns) to an empty composer: an entry is

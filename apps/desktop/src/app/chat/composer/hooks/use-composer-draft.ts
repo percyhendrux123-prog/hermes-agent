@@ -16,6 +16,7 @@ import {
   isFreshDraftScope,
   onComposerDraftSyncRequest,
   reloadPersistedDrafts,
+  savedDraftAt,
   stashSessionDraft,
   takeSessionDraft
 } from '@/store/composer'
@@ -766,18 +767,32 @@ export function useComposerDraft({
     }
 
     // The saved draft can already be an interrupted send's words (persisted before the send cleared
-    // the composer): it takes that send's identity before Enter could mint a second one.
-    const adopted = adoptInterruptedSend(activeQueueSessionKey, text, interruptedSend)
+    // the composer): it takes that send's identity, once its owner lock proves no live window still
+    // sends it, provided the composer still holds exactly that saved draft.
+    void adoptInterruptedSend(activeQueueSessionKey, text, savedDraftAt(activeQueueSessionKey), {
+      ...interruptedSend,
+      adopt: adopted => {
+        if (
+          draftScopeRef.current !== activeQueueSessionKey ||
+          !draftRetryTextMatches(adopted, syncDraftFromEditor()) ||
+          retryAttachmentIds(attachmentScope.$attachments.get()).join() !== retryAttachmentIds(attachments).join()
+        ) {
+          return false
+        }
 
-    if (adopted && !draftRetryTextMatches(draftRetryRef.current, text)) {
-      rememberDraftRetry(activeQueueSessionKey, { ...adopted, attachmentIds: retryAttachmentIds(attachments) })
-    }
+        if (!draftRetryTextMatches(draftRetryRef.current, text)) {
+          rememberDraftRetry(activeQueueSessionKey, { ...adopted, attachmentIds: retryAttachmentIds(attachments) })
+        }
 
-    // The saved draft can already carry a text-only identity for these words; the journaled send
-    // still names the attachments the reload dropped.
-    if (adopted && !attachments.length) {
-      noteAttachmentsNotRestored(adopted)
-    }
+        // The saved draft can already carry a text-only identity for these words; the journaled send
+        // still names the attachments the reload dropped.
+        if (!attachments.length) {
+          noteAttachmentsNotRestored(adopted)
+        }
+
+        return true
+      }
+    })
 
     if (!text.trim() && attachments.length === 0) {
       // A send its page never finished (the window closed or reloaded mid-send) is this draft.

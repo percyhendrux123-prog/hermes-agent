@@ -2,6 +2,7 @@ import { getSessionMessages } from '@/api/sessions'
 import type { SessionMessage } from '@/types/hermes'
 
 import { listedSubmissions } from './admitted-submissions'
+import { isFreshDraftScope } from './composer'
 
 // A window can close after the backend admitted a send but before the submit ack came back. Its
 // outbox entry then outlives a send that DID land: re-offering it as the draft would show the words
@@ -17,8 +18,6 @@ const SKEW_MS = 10 * 60_000
 const MAX_PAGES = 20
 // Opening the session resumes it, and the resume snapshot lists its pending admissions.
 const SNAPSHOT_WAIT_MS = 5000
-
-const NEW_SESSION_SCOPE = /^__new__/
 
 function submissionOf(message: SessionMessage): unknown {
   let metadata: unknown = message.display_metadata
@@ -43,7 +42,7 @@ const predates = (message: SessionMessage, sentAt: number) =>
  *  entry is then re-offered as the draft, so an unknown outcome can show the words twice but never
  *  lose them. */
 export async function sendLanded(scope: string, submissionId: string, sentAt?: number): Promise<boolean> {
-  if (!scope || NEW_SESSION_SCOPE.test(scope)) {
+  if (!scope || isFreshDraftScope(scope)) {
     return false
   }
 

@@ -204,7 +204,7 @@ it('a message sent right before the window closes is never lost and never sent t
   expect(reopened).toHaveBeenCalledTimes(1)
   expect(reopened.mock.calls[0][0].trim()).toBe('my long question')
   expect(reopened.mock.calls[0][1]?.submission_id).toBe(firstId)
-})
+}, 30_000)
 
 it('a send the owner admitted before the window closed is never offered again as the draft', async () => {
   // Admitted and run (its stored user row names it), admitted and still queued (the resume snapshot
@@ -358,3 +358,20 @@ it('recovery never discards a file the user attached while it was running', asyn
   expect(await attached()).toEqual(['new-file.txt'])
   expect(handles.editor()).toBe('late words')
 })
+
+it('equal words typed again after an interrupted send are a new message, never that send', async () => {
+  const firstId = await sendThenClose('same words')
+  const { at } = JSON.parse(window.localStorage.getItem(outboxKeys()[0])!) as { at: number }
+
+  // The draft holding those words was saved after the send: the user typed them again.
+  window.localStorage.setItem(
+    'hermes:composer-drafts:v4',
+    JSON.stringify({ drafts: { 'stored-B': { at: at + 1000, text: 'same words' } } })
+  )
+  const reopened = vi.fn<ChatBarProps['onSubmit']>(async () => true)
+  await openPage(reopened)
+  await act(async () => {})
+  expect(handles.editor()).toBe('same words')
+  await act(async () => handles.submitDraft())
+  expect(reopened.mock.calls[0][1]?.submission_id).not.toBe(firstId)
+}, 30_000)

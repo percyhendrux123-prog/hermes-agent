@@ -1,6 +1,6 @@
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 
-import { type ComposerAttachment, freshDraftScope } from './composer'
+import { type ComposerAttachment, draftKey as scopeKey } from './composer'
 
 /** The identity of an uncertain send that was restored into a composer draft.
  *  Sending that exact draft again is the explicit retry (same `submission_id`,
@@ -52,9 +52,6 @@ export function loadedDraftRetry(
     ? { ...retry, attachmentIds: [] }
     : retry
 }
-
-/** The storage key of a draft scope, the same resolution the draft stash uses. */
-const scopeKey = (scope: string | null | undefined) => scope?.trim() || freshDraftScope()
 
 export function readDraftRetry(scope: string | null | undefined): ComposerDraftRetry | undefined {
   try {
