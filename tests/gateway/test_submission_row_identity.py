@@ -66,3 +66,23 @@ async def test_a_retry_of_an_admitted_id_is_an_info_line_never_an_error(tmp_path
     assert reply['error']['data']['field'] == 'request_id', reply
     refusals = [r for r in caplog.records if 'refused for profile' in r.getMessage()]
     assert [r.levelname for r in refusals] == ['INFO'], [(r.levelname, r.getMessage()) for r in refusals]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_create_request_id_stays_a_warning(tmp_path, monkeypatch, caplog):
+    """Only the admitted-send retry is lowered: session.create's ``invalid_params field=request_id`` still reaches errors.log."""
+    from gateway.session_controls import AuthorityConnection
+
+    async def answer(event):
+        return 'ok'
+    authority = await _authority(tmp_path, monkeypatch, answer)
+    connection = AuthorityConnection(authority, object(), {'user_id': 'owner'})
+    try:
+        with caplog.at_level('DEBUG', logger='gateway.session_controls'):
+            reply = await connection.dispatch({'id': 1, 'method': 'session.create', 'params': {'request_id': 'x' * 300}})
+    finally:
+        await connection.close()
+
+    assert reply['error']['data']['field'] == 'request_id', reply
+    refusals = [r for r in caplog.records if 'refused for profile' in r.getMessage()]
+    assert [r.levelname for r in refusals] == ['WARNING'], [(r.levelname, r.getMessage()) for r in refusals]

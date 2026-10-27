@@ -52,8 +52,9 @@ def _log_refusal(profile, method, exc: RuntimeStoreError) -> None:
     A refusal that names the check that fired is a launch diagnostic (warning). A bare reason code is
     the client's own state: ``permission_denied`` on a submit, ``not_found``, ``session_busy`` are
     routine, and a retrying client must not be able to flood the gateway log, so those stay at debug
-    where they were silent before. ``field=request_id`` is a client's explicit retry of a send already
-    admitted (the dedupe working), so it is info: expected, never in errors.log. The shape follows the
+    where they were silent before. ``admission_conflict field=request_id`` is a client's explicit retry of
+    a send already admitted (the dedupe working), so it is info: expected, never in errors.log. Any other
+    reason tagged ``field=request_id`` (session.create's ``invalid_params``) is a real refusal: warning. The shape follows the
     gateway's own refusal log lines (``gateway/run_notifications.py``): what was refused, for which
     profile, and why."""
     line = '%s refused for profile=%s: %s%s%s'
@@ -63,7 +64,7 @@ def _log_refusal(profile, method, exc: RuntimeStoreError) -> None:
     field = getattr(exc, 'field', None)
     if exc.reason == 'session_busy' or not (field or getattr(exc, 'detail', None)):
         logger.debug(line, *args)
-    elif field == 'request_id':
+    elif field == 'request_id' and exc.reason == 'admission_conflict':
         logger.info(line, *args)
     else:
         logger.warning(line, *args)
