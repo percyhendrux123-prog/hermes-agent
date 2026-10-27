@@ -1,4 +1,4 @@
-import { SLASH_COMMAND_RE } from '@hermes/shared'
+import { randomUuid, SLASH_COMMAND_RE } from '@hermes/shared'
 import { atom } from 'nanostores'
 
 import {
@@ -340,7 +340,7 @@ const attachmentKeys = (attachments: ComposerAttachment[]) => JSON.stringify(att
 // An edited local entry is a new message: it drains under a fresh submission id (see `submissionId`).
 const editedSubmission = (entry: QueuedPromptEntry, text: string, attachments: ComposerAttachment[]) =>
   !entry.serverStatus && (entry.text !== text || attachmentKeys(entry.attachments) !== attachmentKeys(attachments))
-    ? { submissionId: crypto.randomUUID() }
+    ? { submissionId: randomUuid() }
     : {}
 
 export const getQueuedPrompts = (key: string | null | undefined): QueuedPromptEntry[] => {
